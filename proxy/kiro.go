@@ -219,8 +219,8 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
-			// 认证错误不继续尝试
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			// 认证错误和支付错误不继续尝试
+			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
 				return lastErr
 			}
 			fmt.Printf("[KiroAPI] Endpoint %s error: %v\n", ep.Name, lastErr)

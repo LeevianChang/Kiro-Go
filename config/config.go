@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 // GenerateMachineId generates a UUID v4 format machine identifier.
@@ -103,6 +104,9 @@ type Config struct {
 
 	// Endpoint configuration: "auto", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
+
+	// Logging configuration
+	EnableRequestLog bool `json:"enableRequestLog"` // Enable request logging with key info only
 
 	// Global statistics (persisted across restarts)
 	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
@@ -276,6 +280,20 @@ func DeleteAccount(id string) error {
 	return nil
 }
 
+func DisableAccount(id string, reason string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].Enabled = false
+			cfg.Accounts[i].BanReason = reason
+			cfg.Accounts[i].BanTime = time.Now().Unix()
+			return Save()
+		}
+	}
+	return nil
+}
+
 func UpdateAccountToken(id, accessToken, refreshToken string, expiresAt int64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -438,5 +456,20 @@ func UpdatePreferredEndpoint(endpoint string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.PreferredEndpoint = endpoint
+	return Save()
+}
+
+// IsRequestLogEnabled 检查是否启用请求日志
+func IsRequestLogEnabled() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	return cfg.EnableRequestLog
+}
+
+// UpdateRequestLogEnabled 更新请求日志开关
+func UpdateRequestLogEnabled(enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.EnableRequestLog = enabled
 	return Save()
 }

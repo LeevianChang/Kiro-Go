@@ -432,12 +432,22 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 获取账号
-	account := h.pool.GetNext()
-	if account == nil {
+	// 解析模型和 thinking 模式（提前解析以生成 conversationId）
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	req.Model = actualModel
+
+	// 转换请求以获取 conversationId
+	kiroPayload := ClaudeToKiro(&req, thinking)
+	conversationID := kiroPayload.ConversationState.ConversationID
+
+	// 基于 conversationId 获取账号（实现账号亲和性）
+	selection := h.pool.GetByHashWithReason(conversationID)
+	if selection == nil || selection.Account == nil {
 		h.sendClaudeError(w, 503, "api_error", "No available accounts")
 		return
 	}
+	account := selection.Account
 
 	// 检查并刷新 token
 	if err := h.ensureValidToken(account); err != nil {
@@ -445,25 +455,24 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 解析模型和 thinking 模式
-	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
-	req.Model = actualModel
 	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
 
-	// 转换请求
-	kiroPayload := ClaudeToKiro(&req, thinking)
+	// 记录请求日志
+	messageCount := len(req.Messages)
+	hasCacheControl := HasCacheControl(&req)
+	LogRequestInfo(conversationID, account.Email, actualModel, messageCount, estimatedInputTokens, req.Stream, hasCacheControl, selection.Reason)
 
 	// 流式或非流式
+	startTime := time.Now()
 	if req.Stream {
-		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, conversationID, startTime)
 	} else {
-		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, conversationID, startTime)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, conversationID string, startTime time.Time) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -809,7 +818,18 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
+
+		// 检测 402 错误并禁用账号
+		if strings.Contains(err.Error(), "HTTP 402") {
+			h.pool.DisableAccount(account.ID, "Payment required (402)")
+			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+		}
+
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "quota"))
+
+		// 记录错误日志
+		LogErrorInfo(conversationID, account.Email, "api_error", err.Error())
+
 		h.sendSSE(w, flusher, "error", map[string]interface{}{
 			"type":  "error",
 			"error": map[string]string{"type": "api_error", "message": err.Error()},
@@ -839,6 +859,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+
+	// 记录响应日志
+	duration := time.Since(startTime)
+	LogResponseInfo(conversationID, account.Email, inputTokens, outputTokens, credits, duration, true)
 
 	// 发送 message_delta
 	stopReason := "end_turn"
@@ -923,7 +947,7 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, conversationID string, startTime time.Time) {
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
@@ -956,7 +980,18 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
+
+		// 检测 402 错误并禁用账号
+		if strings.Contains(err.Error(), "HTTP 402") {
+			h.pool.DisableAccount(account.ID, "Payment required (402)")
+			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+		}
+
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
+
+		// 记录错误日志
+		LogErrorInfo(conversationID, account.Email, "api_error", err.Error())
+
 		h.sendClaudeError(w, 500, "api_error", err.Error())
 		return
 	}
@@ -977,6 +1012,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+
+	// 记录响应日志
+	duration := time.Since(startTime)
+	LogResponseInfo(conversationID, account.Email, inputTokens, outputTokens, credits, duration, true)
 
 	if thinking && thinkingContent != "" {
 		switch thinkingFormat {
@@ -1026,7 +1065,17 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	account := h.pool.GetNext()
+	// 解析模型和 thinking 模式（提前解析以生成 conversationId）
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	req.Model = actualModel
+
+	// 转换请求以获取 conversationId
+	kiroPayload := OpenAIToKiro(&req, thinking)
+	conversationID := kiroPayload.ConversationState.ConversationID
+
+	// 基于 conversationId 获取账号（实现账号亲和性）
+	account := h.pool.GetByHash(conversationID)
 	if account == nil {
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
@@ -1037,13 +1086,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 解析模型和 thinking 模式
-	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
-	req.Model = actualModel
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
-
-	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	if req.Stream {
 		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
@@ -1369,6 +1412,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
+
+		// 检测 402 错误并禁用账号
+		if strings.Contains(err.Error(), "HTTP 402") {
+			h.pool.DisableAccount(account.ID, "Payment required (402)")
+			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+		}
+
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
 		return
 	}
@@ -1452,6 +1502,13 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
+
+		// 检测 402 错误并禁用账号
+		if strings.Contains(err.Error(), "HTTP 402") {
+			h.pool.DisableAccount(account.ID, "Payment required (402)")
+			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+		}
+
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
 		h.sendOpenAIError(w, 500, "server_error", err.Error())
 		return
@@ -1587,6 +1644,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetEndpointConfig(w, r)
 	case path == "/endpoint" && r.Method == "POST":
 		h.apiUpdateEndpointConfig(w, r)
+	case path == "/logging" && r.Method == "GET":
+		h.apiGetLoggingConfig(w, r)
+	case path == "/logging" && r.Method == "POST":
+		h.apiUpdateLoggingConfig(w, r)
 	case path == "/version" && r.Method == "GET":
 		h.apiGetVersion(w, r)
 	case path == "/export" && r.Method == "POST":
@@ -1812,7 +1873,7 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		h.pool.Reload()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success":   true,
 			"refreshed": successCount,
 			"failed":    failCount,
 		})
@@ -2543,6 +2604,33 @@ func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := config.UpdatePreferredEndpoint(req.PreferredEndpoint); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// apiGetLoggingConfig 获取日志配置
+func (h *Handler) apiGetLoggingConfig(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]bool{
+		"enableRequestLog": config.IsRequestLogEnabled(),
+	})
+}
+
+// apiUpdateLoggingConfig 更新日志配置
+func (h *Handler) apiUpdateLoggingConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		EnableRequestLog bool `json:"enableRequestLog"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	if err := config.UpdateRequestLogEnabled(req.EnableRequestLog); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

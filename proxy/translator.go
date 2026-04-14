@@ -98,15 +98,20 @@ type ClaudeMessage struct {
 }
 
 type ClaudeContentBlock struct {
-	Type      string       `json:"type"`
-	Text      string       `json:"text,omitempty"`
-	Thinking  string       `json:"thinking,omitempty"`
-	ID        string       `json:"id,omitempty"`
-	Name      string       `json:"name,omitempty"`
-	Input     interface{}  `json:"input,omitempty"`
-	ToolUseID string       `json:"tool_use_id,omitempty"`
-	Content   interface{}  `json:"content,omitempty"` // for tool_result
-	Source    *ImageSource `json:"source,omitempty"`
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	Thinking     string        `json:"thinking,omitempty"`
+	ID           string        `json:"id,omitempty"`
+	Name         string        `json:"name,omitempty"`
+	Input        interface{}   `json:"input,omitempty"`
+	ToolUseID    string        `json:"tool_use_id,omitempty"`
+	Content      interface{}   `json:"content,omitempty"` // for tool_result
+	Source       *ImageSource  `json:"source,omitempty"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+type CacheControl struct {
+	Type string `json:"type"` // "ephemeral"
 }
 
 type ImageSource struct {
