@@ -1,8 +1,8 @@
 package proxy
 
 import (
-	"fmt"
 	"kiro-api-proxy/config"
+	"log"
 	"strings"
 	"time"
 )
@@ -33,10 +33,10 @@ func LogRequestInfo(conversationID, accountEmail, model string, messageCount, es
 	// 格式化账号选择原因
 	accountSelection := ""
 	if selectionReason != "primary" {
-		accountSelection = fmt.Sprintf(" | Selection: %s", selectionReason)
+		accountSelection = " | Selection: " + selectionReason
 	}
 
-	fmt.Printf("[%s] Request | User: %s | ConvID: %s | Account: %s%s | Model: %s | Messages: %d | Est.Tokens: %d | Mode: %s | Cache: %s\n",
+	log.Printf("[%s] Request | User: %s | ConvID: %s | Account: %s%s | Model: %s | Messages: %d | Est.Tokens: %d | Mode: %s | Cache: %s\n",
 		timestamp, userID, conversationID, accountEmail, accountSelection, model, messageCount, estimatedTokens, streamMode, cacheStatus)
 }
 
@@ -52,7 +52,7 @@ func LogResponseInfo(conversationID, accountEmail string, inputTokens, outputTok
 		status = "FAILED"
 	}
 
-	fmt.Printf("[%s] Response | ConvID: %s | Account: %s | Status: %s | In: %d | Out: %d | Credits: %.2f | Duration: %dms\n",
+	log.Printf("[%s] Response | ConvID: %s | Account: %s | Status: %s | In: %d | Out: %d | Credits: %.2f | Duration: %dms\n",
 		timestamp, conversationID, accountEmail, status, inputTokens, outputTokens, credits, duration.Milliseconds())
 }
 
@@ -68,7 +68,7 @@ func LogErrorInfo(conversationID, accountEmail, errorType, errorMsg string) {
 		errorMsg = errorMsg[:200] + "..."
 	}
 
-	fmt.Printf("[%s] Error | ConvID: %s | Account: %s | Type: %s | Message: %s\n",
+	log.Printf("[%s] Error | ConvID: %s | Account: %s | Type: %s | Message: %s\n",
 		timestamp, conversationID, accountEmail, errorType, errorMsg)
 }
 
@@ -168,9 +168,9 @@ func LogRequestDetail(conversationID, accountEmail, model string, messages []Cla
 		}
 	}
 
-	fmt.Printf("[%s] Detail | ConvID: %s | Account: %s | Model: %s\n", timestamp, conversationID, accountEmail, model)
+	log.Printf("[%s] Detail | ConvID: %s | Account: %s | Model: %s\n", timestamp, conversationID, accountEmail, model)
 	if sysPromptSummary != "" {
-		fmt.Printf("  System: %s\n", sysPromptSummary)
+		log.Printf("  System: %s\n", sysPromptSummary)
 	}
-	fmt.Printf("  LastMsg: %s\n", lastMsg)
+	log.Printf("  LastMsg: %s\n", lastMsg)
 }

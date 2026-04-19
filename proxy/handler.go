@@ -7,6 +7,7 @@ import (
 	"kiro-api-proxy/auth"
 	"kiro-api-proxy/config"
 	"kiro-api-proxy/pool"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -115,7 +116,7 @@ func (h *Handler) refreshAllAccounts() {
 		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-300 {
 			newAccessToken, newRefreshToken, newExpiresAt, err := auth.RefreshToken(account)
 			if err != nil {
-				fmt.Printf("[BackgroundRefresh] Token refresh failed for %s: %v\n", account.Email, err)
+				log.Printf("[BackgroundRefresh] Token refresh failed for %s: %v\n", account.Email, err)
 				continue
 			}
 			account.AccessToken = newAccessToken
@@ -130,12 +131,12 @@ func (h *Handler) refreshAllAccounts() {
 		// 刷新账户信息
 		info, err := RefreshAccountInfo(account)
 		if err != nil {
-			fmt.Printf("[BackgroundRefresh] Failed to refresh %s: %v\n", account.Email, err)
+			log.Printf("[BackgroundRefresh] Failed to refresh %s: %v\n", account.Email, err)
 			continue
 		}
 
 		config.UpdateAccountInfo(account.ID, *info)
-		fmt.Printf("[BackgroundRefresh] Refreshed %s: %s %.1f/%.1f\n", account.Email, info.SubscriptionType, info.UsageCurrent, info.UsageLimit)
+		log.Printf("[BackgroundRefresh] Refreshed %s: %s %.1f/%.1f\n", account.Email, info.SubscriptionType, info.UsageCurrent, info.UsageLimit)
 	}
 	h.pool.Reload()
 }
@@ -367,7 +368,7 @@ func (h *Handler) refreshModelsCache() {
 
 	models, err := ListAvailableModels(account)
 	if err != nil {
-		fmt.Printf("[ModelsCache] Failed to refresh: %v\n", err)
+		log.Printf("[ModelsCache] Failed to refresh: %v\n", err)
 		return
 	}
 
@@ -376,7 +377,7 @@ func (h *Handler) refreshModelsCache() {
 		h.cachedModels = models
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
-		fmt.Printf("[ModelsCache] Cached %d models\n", len(models))
+		log.Printf("[ModelsCache] Cached %d models\n", len(models))
 	}
 }
 
@@ -819,13 +820,20 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	if err != nil {
 		h.recordFailure()
 
-		// 检测 402 错误并禁用账号
-		if strings.Contains(err.Error(), "HTTP 402") {
+		// 检测严重错误并禁用账号
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "HTTP 401") {
+			h.pool.DisableAccount(account.ID, "Unauthorized (401) - token invalid or expired")
+			log.Printf("[Handler] Account %s disabled due to 401 error\n", account.Email)
+		} else if strings.Contains(errMsg, "HTTP 403") {
+			h.pool.DisableAccount(account.ID, "Forbidden (403) - access denied")
+			log.Printf("[Handler] Account %s disabled due to 403 error\n", account.Email)
+		} else if strings.Contains(errMsg, "HTTP 402") {
 			h.pool.DisableAccount(account.ID, "Payment required (402)")
-			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+			log.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
 		}
 
-		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "quota"))
+		h.pool.RecordError(account.ID, strings.Contains(errMsg, "429") || strings.Contains(errMsg, "quota"))
 
 		// 记录错误日志
 		LogErrorInfo(conversationID, account.Email, "api_error", err.Error())
@@ -984,7 +992,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		// 检测 402 错误并禁用账号
 		if strings.Contains(err.Error(), "HTTP 402") {
 			h.pool.DisableAccount(account.ID, "Payment required (402)")
-			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+			log.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
 		}
 
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
@@ -1416,7 +1424,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		// 检测 402 错误并禁用账号
 		if strings.Contains(err.Error(), "HTTP 402") {
 			h.pool.DisableAccount(account.ID, "Payment required (402)")
-			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+			log.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
 		}
 
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
@@ -1506,7 +1514,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		// 检测 402 错误并禁用账号
 		if strings.Contains(err.Error(), "HTTP 402") {
 			h.pool.DisableAccount(account.ID, "Payment required (402)")
-			fmt.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
+			log.Printf("[Handler] Account %s disabled due to 402 error\n", account.Email)
 		}
 
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))

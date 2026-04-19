@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"kiro-api-proxy/config"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -179,6 +180,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
 
 	var lastErr error
+	var has429 bool
 	for _, ep := range endpoints {
 		// 更新 payload 中的 origin
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
@@ -204,14 +206,15 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		resp, err := kiroHttpClient.Do(req)
 		if err != nil {
 			lastErr = err
-			fmt.Printf("[KiroAPI] Endpoint %s failed: %v\n", ep.Name, err)
+			log.Printf("[KiroAPI] Endpoint %s failed: %v\n", ep.Name, err)
 			continue
 		}
 
 		if resp.StatusCode == 429 {
 			resp.Body.Close()
-			fmt.Printf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...\n", ep.Name)
+			log.Printf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...\n", ep.Name)
 			lastErr = fmt.Errorf("quota exhausted on %s", ep.Name)
+			has429 = true
 			continue
 		}
 
@@ -223,13 +226,18 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
 				return lastErr
 			}
-			fmt.Printf("[KiroAPI] Endpoint %s error: %v\n", ep.Name, lastErr)
+			log.Printf("[KiroAPI] Endpoint %s error: %v\n", ep.Name, lastErr)
 			continue
 		}
 
 		err = parseEventStream(resp.Body, callback)
 		resp.Body.Close()
 		return err
+	}
+
+	// 如果遇到过 429 错误，通知账号池标记该账号配额耗尽
+	if has429 && callback != nil && callback.OnError != nil {
+		callback.OnError(fmt.Errorf("429"))
 	}
 
 	if lastErr != nil {
